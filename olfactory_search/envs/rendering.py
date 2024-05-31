@@ -1,386 +1,295 @@
-import dataclasses
-
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import colors, colormaps
-
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from matplotlib.colors import ListedColormap, LinearSegmentedColormap
-
-import pygame
+import math
 
 
-# def get_scalarmap(index, Nhits=0):
-#     if index == 0:
-#         topcolors = colormaps.get_cmap('Greys')
-#         bottomcolors = colormaps.get_cmap('Spectral_r')
-#         newcolors = np.vstack((topcolors(0.5),
-#             bottomcolors(np.linspace(0, 1, Nhits - 1))))
-#         cmap = ListedColormap(newcolors, name='GreyColors')
-#         cmap.set_under(color="black")
-#         sm = plt.cm.ScalarMappable(norm=colors.Normalize(vmin=-0.5, vmax=Nhits - 0.5), cmap=cmap)
-#     elif index == 1:
-#         cmap = colormaps.get_cmap("viridis")
-#         sm = plt.cm.ScalarMappable(norm=colors.LogNorm(vmin=1e-3, vmax=1.0), cmap=cmap)
-#     return cmap, sm
+CELL_TO_IDX = {
+    None: 0,
+    "odor": 1,
+    "start": 2,
+    "source": 3,
+    "agent": 4,
+}
 
-# @dataclasses.dataclass
-# class VisitationMap:
-#     grid_size: list[int, int] | list[int, int, int]
-
-#     """
-#     Returns: a np.array of shape (grid_size, grid_size) with the number of visits to each cell
-#     """
-#     def _reset(self):
-#         num_states = np.prod(self.grid_size)
-#         self.data = np.zeros((num_states, 1), dtype=np.int64)
-
-#     def _add_visit(self, state):
-#         assert len(state) == len(self.grid_size)
-
-#         strides = [1]
-#         for dim in reversed(self.grid_size[:-1]):
-#             strides.insert(0, strides[0] * dim)
-#         index = sum(i * s for i, s in zip(state, strides))
-#         self.data[index] += 1
-
-#     @property
-#     def _total_visit(self):
-#         return np.sum(self.data)
-
-# class RenderFrame(object):
-#     """
-#     There are three axis for visualization: 
-#         - ax1 shows the trajectory and the true plume model; 
-#         - ax2 shows the agent's belief (optional) of the plume model.
-#     """
-#     def __init__(self, source, agent, isDrawSource=True):
-#         self.source = source
-#         self.agent = agent
-#         self.isDrawSource = isDrawSource
-#         self.Nhits = 3
-
-#         self.ax = None
-#         self.history_states = []
-#         self.history_hits = []
-
-#     def setup(self):
-#         figsize = (10, 10)
-#         Nhits = self.Nhits
-#         cm = []
-
-#         # setup figure
-#         fig, ax = plt.subplots(1, 2, figsize=figsize)
-#         bottom = 0.1
-#         top = 0.88
-#         left = 0.05
-#         right = 0.94
-#         plt.subplots_adjust(left=left, bottom=bottom, right=right, top=top, hspace=0.35)
-
-#         # axis for state and p_source
-#         for i in range(2):
-#             ColorMap, ScalarMap = get_scalarmap(i, Nhits)
-#             cm.append(ColorMap)
-
-#             divider = make_axes_locatable(ax[i])
-#             cax = divider.append_axes("right", size="5%", pad=0.3)
-#             fig.colorbar(ScalarMap, cax=cax, ticks=np.arange(0, Nhits))
-#             ax[i].set_aspect("equal", adjustable="box")
-#             # ax[i].axis("off")
-
-#         # position of source
-#         if self.isDrawSource:
-#             for i in range(2):
-#                 ax[i].plot(self.source[0], self.source[1], color="r", marker="$+$", markersize=8, zorder=10000)
-
-#         # trajectory
-#         for i in range(2):
-#             ax[i].plot(self.agent[0], self.agent[1], color="r", marker='o', markersize=8, zorder=10000)
-
-#         self.ax = ax
-#         self.cm = cm
-#         self.history_states.append(self.agent)
-#         self.history_hits.append(0)
-
-#     def render_current_step(
-#             self,
-#             new_pos: np.ndarray,
-#             new_hit: int,
-#     ):
-#         self.grid_size = 19
-#         for i in range(2):
-
-#             self.ax[i].scatter(new_pos[0], new_pos[1], 70, c=new_hit, cmap=self.cm[0], marker="o", alpha=0.5)
-#             self.ax[i].plot([self.history_states[-1][0], new_pos[0]], [self.history_states[-1][1], new_pos[1]], c="k", linewidth=1)
-
-#         self.history_states.append(new_pos)
-        
+ROUTE_TO_IDX = {
+    None: 0,
+    "12": 1,
+    "3": 2,
+    "6": 3,
+    "9": 4,
+}
 
 
-class Visualization:
-    """ A class for visualizing the search in 1D, 2D or 3D
+COLORS = {
+    "red": np.array([255, 0, 0]),
+    "green": np.array([0, 255, 0]),
+    "blue": np.array([0, 0, 255]),
+    "purple": np.array([112, 39, 195]),
+    "yellow": np.array([255, 255, 0]),
+    "black": np.array([0, 0, 0]),
+    "grey": np.array([100, 100, 100]),
+    "hit3": np.array([158, 0, 66]),
+    "hit2": np.array([252, 226, 85]),
+    "hit1": np.array([50, 187, 197]),
+}
 
-    Args:
-        env (SourceTracking):
-            an instance of the SourceTracking class
-        live (bool, optional):
-            whether to show live preview (faster if False) (default=False)
-        filename (str, optional):
-            file name for the video (default='test')
-        log_prob (bool, optional):
-            whether to show log(prob) instead of prob (default=False)
-        marginal_prob_3d (bool, optional):
-            in 3D, whether to show marginal pdfs on each plane, instead of the pdf in the planes that the
-            agent crosses (default=False)
+ROUTE = {
+    "12": (0.5, 0.0, 0.5, 0.5, 0.05),
+    "6": (0.5, 1.0, 0.5, 0.5, 0.05),
+    "9": (0.0, 0.5, 0.5, 0.5, 0.05),
+    "3": (1.0, 0.5, 0.5, 0.5, 0.05),
+}
+
+
+def downsample(img, factor):
     """
-    
-    def __init__(self,
-                 Ndim: int,
-                 source,
-                 agent,
-                 log_prob=True,
-                 marginal_prob_3d=False,
-                 ):
-        if Ndim > 3 or Ndim < 1 or not isinstance(Ndim, int):
-            raise Exception("Problem with Ndim: visualization is not possible")
-        
-        self.Ndim = Ndim
-        self.source = source
-        self.agent = agent
+    Downsample an image along both dimensions by some factor
+    """
 
-        self.is_draw_source = True
+    assert img.shape[0] % factor == 0
+    assert img.shape[1] % factor == 0
 
-        self.log_prob = log_prob
-        self.marginal_prob_3d = marginal_prob_3d
+    img = img.reshape(
+        [img.shape[0] // factor, factor, img.shape[1] // factor, factor, 3]
+    )
+    img = img.mean(axis=3)
+    img = img.mean(axis=1)
 
-    def record_snapshot(self, num, toptext=''):
-        """Create a frame from current state of the search, and save it.
+    return img
 
-        Args:
-            num (int): frame number (used to create filename)
-            toptext (str): text that will appear in the top part of the frame (like a title)
-        """
 
-        if self.video_live:
-            if not hasattr(self, 'fig'):
-                fig, ax = self._setup_render()
-                # ax[0].set_title("observation map (current: %s)" % self._obs_to_str())
-                # ax[1].set_title("source probability distribution (entropy = %.3f)" % self.env.entropy)
-                self.fig = fig
-                self.ax = ax
-            else:
-                fig = self.fig
-                ax = self.ax
-                # ax[0].title.set_text("observation map (current: %s)" % self._obs_to_str())
-                # ax[1].title.set_text("source probability distribution (entropy = %.3f)" % self.env.entropy)
+def fill_coords(img, fn, color):
+    """
+    Fill pixels of an image with coordinates matching a filter function
+    """
+
+    for y in range(img.shape[0]):
+        for x in range(img.shape[1]):
+            yf = (y + 0.5) / img.shape[0]
+            xf = (x + 0.5) / img.shape[1]
+            if fn(xf, yf):
+                img[y, x] = color
+
+    return img
+
+
+def rotate_fn(fin, cx, cy, theta):
+    def fout(x, y):
+        x = x - cx
+        y = y - cy
+
+        x2 = cx + x * math.cos(-theta) - y * math.sin(-theta)
+        y2 = cy + y * math.cos(-theta) + x * math.sin(-theta)
+
+        return fin(x2, y2)
+
+    return fout
+
+
+def point_in_line(x0, y0, x1, y1, r):
+    p0 = np.array([x0, y0], dtype=np.float32)
+    p1 = np.array([x1, y1], dtype=np.float32)
+    dir = p1 - p0
+    dist = np.linalg.norm(dir)
+    dir = dir / dist
+
+    xmin = min(x0, x1) - r
+    xmax = max(x0, x1) + r
+    ymin = min(y0, y1) - r
+    ymax = max(y0, y1) + r
+
+    def fn(x, y):
+        # Fast, early escape test
+        if x < xmin or x > xmax or y < ymin or y > ymax:
+            return False
+
+        q = np.array([x, y])
+        pq = q - p0
+
+        # Closest point on line
+        a = np.dot(pq, dir)
+        a = np.clip(a, 0, dist)
+        p = p0 + a * dir
+
+        dist_to_line = np.linalg.norm(q - p)
+        return dist_to_line <= r
+
+    return fn
+
+
+def point_in_circle(cx, cy, r):
+    def fn(x, y):
+        return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r
+
+    return fn
+
+
+def point_in_rect(xmin, xmax, ymin, ymax):
+    def fn(x, y):
+        return x >= xmin and x <= xmax and y >= ymin and y <= ymax
+
+    return fn
+
+
+def point_in_triangle(a, b, c):
+    a = np.array(a, dtype=np.float32)
+    b = np.array(b, dtype=np.float32)
+    c = np.array(c, dtype=np.float32)
+
+    def fn(x, y):
+        v0 = c - a
+        v1 = b - a
+        v2 = np.array((x, y)) - a
+
+        # Compute dot products
+        dot00 = np.dot(v0, v0)
+        dot01 = np.dot(v0, v1)
+        dot02 = np.dot(v0, v2)
+        dot11 = np.dot(v1, v1)
+        dot12 = np.dot(v1, v2)
+
+        # Compute barycentric coordinates
+        inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
+        u = (dot11 * dot02 - dot01 * dot12) * inv_denom
+        v = (dot00 * dot12 - dot01 * dot02) * inv_denom
+
+        # Check if point is in triangle
+        return (u >= 0) and (v >= 0) and (u + v) < 1
+
+    return fn
+
+
+class OdorCell:
+    def __init__(self, hit=-2, type="odor"):
+        self.hit = hit
+        self.actions = {"12": False, "3": False, "6": False, "9": False}
+        # self.last_action = None if last_action is None else compare_vectors(last_action)
+        # self.next_action = None if next_action is None else compare_vectors(next_action)
+        self.type = type
+
+    def dict_to_int(self):
+        return int(
+            "".join(
+                [str(int(self.actions[action])) for action in ["12", "3", "6", "9"]]
+            ),
+            2,
+        )
+
+    def encode(self) -> tuple[int, int, int, int]:
+        """Encode the a description of this object"""
+        return (CELL_TO_IDX[self.type], self.dict_to_int(), self.hit)
+
+    def add_action(self, v1, v2):
+        action = None
+        if v1 == 0 and v2 == 1:
+            action = "12"
+        elif v1 == 0 and v2 == -1:
+            action = "6"
+        elif v1 == 1 and v2 == 0:
+            action = "9"
+        elif v1 == -1 and v2 == 0:
+            action = "3"
+
+        if action is not None:
+            self.actions[action] = True
+
+    def render(self, img):
+        # Blank cell
+        if self.hit == -2:
+            return img
+
+        # Draw the lower layer
+        if self.hit == -1:
+            color = COLORS["red"]
+        elif self.hit == 0:
+            color = COLORS["grey"]
+        elif self.hit == 1:
+            color = COLORS["hit1"]
+        elif self.hit == 2:
+            color = COLORS["hit2"]
+        elif self.hit == 3:
+            color = COLORS["hit3"]
         else:
-            fig, ax = self._setup_render()
-            # ax[0].set_title("observation map (current: %s)" % self._obs_to_str())
-            # ax[1].set_title("source probability distribution (entropy = %.3f)" % self.env.entropy)
+            raise ValueError("Invalid hit value")
 
-        self._update_render(fig, ax, toptext=toptext)
+        fill_coords(img, point_in_circle(0.5, 0.5, 0.4), color=color)
 
-        if self.video_live:
-            plt.pause(0.1)
-        plt.draw()
-        framefilename = self._framefilename(num)
-        fig.savefig(framefilename, dpi=150)
-        if not self.video_live:
-            plt.close(fig)
+        # Draw the upper layer
+        for keys in self.actions.keys():
+            if self.actions[keys]:
+                fill_coords(img, point_in_line(*ROUTE[keys]), color=COLORS["black"])
 
-    def _setup_render(self):
+        if self.type == "start":
+            fill_coords(
+                img, point_in_line(0.0, 0.0, 1.0, 1.0, 0.02), color=COLORS["black"]
+            )
+            fill_coords(
+                img, point_in_line(1.0, 0.0, 0.0, 1.0, 0.02), color=COLORS["black"]
+            )
+        elif self.type == "source":
+            fill_coords(
+                img,
+                point_in_triangle((0.35, 0.2), (0.35, 0.6), (0.75, 0.4)),
+                color=COLORS["red"],
+            )
+            fill_coords(
+                img, point_in_line(0.35, 0.2, 0.35, 0.8, 0.02), color=COLORS["red"]
+            )
+        
+        if self.type == "agent":
+            fill_coords(img, point_in_circle(0.5, 0.5, 0.5), color=COLORS["grey"])
+            fill_coords(img, point_in_circle(0.5, 0.5, 0.4), color=COLORS["black"])
 
-        figsize = (12.5, 5.5)
-
-        if self.Ndim == 2:
-            # setup figure
-            fig, ax = plt.subplots(1, 2, figsize=figsize)
-            bottom = 0.1
-            top = 0.88
-            left = 0.05
-            right = 0.94
-            plt.subplots_adjust(left=left, bottom=bottom, right=right, top=top, hspace=0.35)
-
-            # state
-            cmap0 = self._cmap0()
-            sm0 = plt.cm.ScalarMappable(norm=colors.Normalize(vmin=-0.5, vmax=self.Nhits - 0.5), cmap=cmap0)
-            divider = make_axes_locatable(ax[0])
-            cax0 = divider.append_axes("right", size="5%", pad=0.3)
-            fig.colorbar(sm0, cax=cax0, ticks=np.arange(0, self.Nhits))
-            ax[0].set_aspect("equal", adjustable="box")
-            ax[0].axis("off")
-
-            # p_source
-            cmap1 = self._cmap1()
-            if self.log_prob:
-                sm1 = plt.cm.ScalarMappable(norm=colors.LogNorm(vmin=1e-3, vmax=1.0), cmap=cmap1)
-            else:
-                sm1 = plt.cm.ScalarMappable(norm=colors.Normalize(vmin=np.min(self.env.p_source), vmax=np.max(self.env.p_source)), cmap=cmap1)
-            divider = make_axes_locatable(ax[1])
-            cax1 = divider.append_axes("right", size="5%", pad=0.3)
-            if self.log_prob:
-                cbar1 = fig.colorbar(sm1, cax=cax1, extend="min")
-            else:
-                cbar1 = fig.colorbar(sm1, cax=cax1)
-            if self.video_live:
-                self.cbar1 = cbar1
-            ax[1].set_aspect("equal", adjustable="box")
-            ax[1].axis("off")
-
-            # position of source
-            if self.is_draw_source:
-                for i in range(2):
-                    ax[i].plot(self.source[0], self.source[1], color="r", marker="$+$", markersize=8, zorder=10000)
-
-        return fig, ax
-
-    def _update_render(self, fig, ax, toptext=''):
-
-        if self.video_live:
-            if hasattr(self, 'artists'):
-                for artist in range(len(self.artists)):
-                    if self.artists[artist] is not None:
-                        if isinstance(self.artists[artist], list):
-                            for art in self.artists[artist]:
-                                art.remove()
-                        else:
-                            self.artists[artist].remove()
-
-        if self.Ndim == 2:
-            self._draw_2D(fig, ax)
-
-        # bottomtext = "$\mathcal{L} = \lambda / \Delta x = $" + str(self.env.lambda_over_dx) \
-        #              + "$\qquad$ $\mathcal{I} = R \Delta t = $" + str(self.env.R_dt) \
-        #              + "$\qquad$ $h_{\mathrm{init}}$ = " + str(self.env.initial_hit)
-        # sup = plt.figtext(0.5, 0.99, toptext, fontsize=13, ha="center", va="top")
-        # bot = plt.figtext(0.5, 0.01, bottomtext, fontsize=10, ha="center", va="bottom")
-        # if self.video_live:
-        #     self.artists.append(sup)
-        #     self.artists.append(bot)
-
-    def _draw_2D(self, fig, ax):
-        # hit map
-        cmap0 = self._cmap0()
-        img0 = ax[0].imshow(
-            np.transpose(self.env.hit_map),
-            vmin=-0.5,
-            vmax=self.env.Nhits - 0.5,
-            origin="lower",
-            cmap=cmap0,
-        )
-
-        # p_source
-        cmap1 = self._cmap1()
-        img1 = ax[1].imshow(
-            np.transpose(self.env.p_source),
-            vmin=np.min(self.env.p_source),
-            vmax=np.max(self.env.p_source),
-            origin="lower",
-            aspect='equal',
-            cmap=cmap1,
-        )
-        if self.video_live:
-            if self.log_prob:
-                sm1 = plt.cm.ScalarMappable(norm=colors.LogNorm(vmin=1e-3, vmax=1.0), cmap=cmap1)
-            else:
-                sm1 = plt.cm.ScalarMappable(norm=colors.Normalize(vmin=np.min(self.env.p_source), vmax=np.max(self.env.p_source)), cmap=cmap1)
-            self.cbar1.update_normal(sm1)
-
-        # position of agent
-        aloc = [0] * 2
-        for i in range(2):
-            aloc[i] = ax[i].plot(self.agent[0], self.agent[1], "ro")
-
-        if self.video_live:
-            self.artists = [img0, img1] + [a for a in aloc]
-
-    def _cmap0(self):
-        topcolors = plt.cm.get_cmap('Greys', 128)
-        bottomcolors = plt.cm.get_cmap('Spectral_r', 128)
-        newcolors = np.vstack((topcolors(0.5),
-                               bottomcolors(np.linspace(0, 1, self.Nhits - 1))))
-        cmap0 = ListedColormap(newcolors, name='GreyColors')
-        if self.Ndim == 2:
-            cmap0.set_under(color="black")
-        return cmap0
-
-    def _cmap1(self):
-        if self.Ndim == 2:
-            cmap1 = plt.cm.get_cmap("viridis", 50)
-        return cmap1
-
-    @property
-    def _alpha0(self):
-        return None
-    
-    @property
-    def _alpha1(self):
-        return None
+        return img
 
 
+# class StartCell(OdorCell):
+#     def __init__(self, hit=0, last_action=None, next_action=None) -> None:
+#         super().__init__(hit=hit, last_action=None, next_action=next_action)
+#         self.type = "start"
+
+#     def render(self, img):
+#         img = super().render(img)
+#         fill_coords(img, point_in_line(0.0, 0.0, 1.0, 1.0, 0.02), color=COLORS["black"])
+#         fill_coords(img, point_in_line(1.0, 0.0, 0.0, 1.0, 0.02), color=COLORS["black"])
+#         return img
 
 
+# class SourceCell(OdorCell):
+#     def __init__(self, hit=0, last_action=None, next_action=None) -> None:
+#         super().__init__(hit=hit, last_action=last_action, next_action=None)
+#         self.type = "source"
 
+#     def render(self, img):
+#         fill_coords(img, point_in_line(0.0, 0.5, 1.0, 0.5, 0.03), color=COLORS["black"])
+#         fill_coords(img, point_in_line(0.5, 0.2, 0.5, 0.8, 0.02), color=COLORS["black"])
+#         return img
+
+
+# class AgentCell(OdorCell):
+#     def __init__(self, hit=0, last_action=None, next_action=None) -> None:
+#         super().__init__(hit=hit, last_action=last_action, next_action=None)
+#         self.type = "agent"
+
+#     def render(self, img):
+#         fill_coords(img, point_in_circle(0.5, 0.5, 0.5), color=COLORS["grey"])
+#         fill_coords(img, point_in_circle(0.5, 0.5, 0.4), color=COLORS["black"])
+#         return img
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
 
-    rf = RenderFrame(
-        source=[5, 5],
-        agent=[0, 0],
-        isDrawSource=True
-    )
-    rf.setup()
+    img = 255 * np.ones((64, 64, 3), dtype=np.uint8)
+    # for i in range(4):
+    #     cell = OdorCell(hit=i)
+    #     img = cell.render(img)
+    #     plt.imshow(img)
+    #     plt.show()
 
-    traj = [np.array([1, 0]), np.array([2, 0]), np.array([2, 1]),
-            np.array([3, 1]), np.array([3, 2]), np.array([3, 3])]
-
-    for i in range(6):
-        rf.render_current_step(
-            new_pos = traj[i],
-            new_hit = 10
-        )
+    cell = OdorCell(hit=0, type="source")
+    cell.add_action(0, 1)
+    cell.add_action(1, 0)
+    print(cell.encode())
+    img = cell.render(img)
+    plt.imshow(img)
     plt.show()
-
-# def render_window_2d(self):
-#     img = self.get_frame(self.highlight, self.tile_size, self.agent_pov)
-
-#     if self.render_mode == "human":
-#         img = np.transpose(img, axes=(1, 0, 2))
-#         if self.render_size is None:
-#             self.render_size = img.shape[:2]
-#         if self.window is None:
-#             pygame.init()
-#             pygame.display.init()
-#             self.window = pygame.display.set_mode(
-#                 (self.screen_size, self.screen_size)
-#             )
-#             pygame.display.set_caption("minigrid")
-#         if self.clock is None:
-#             self.clock = pygame.time.Clock()
-#         surf = pygame.surfarray.make_surface(img)
-
-#         # Create background with mission description
-#         offset = surf.get_size()[0] * 0.1
-#         # offset = 32 if self.agent_pov else 64
-#         bg = pygame.Surface(
-#             (int(surf.get_size()[0] + offset), int(surf.get_size()[1] + offset))
-#         )
-#         bg.convert()
-#         bg.fill((255, 255, 255))
-#         bg.blit(surf, (offset / 2, 0))
-
-#         bg = pygame.transform.smoothscale(bg, (self.screen_size, self.screen_size))
-
-#         font_size = 22
-#         text = self.mission
-#         font = pygame.freetype.SysFont(pygame.font.get_default_font(), font_size)
-#         text_rect = font.get_rect(text, size=font_size)
-#         text_rect.center = bg.get_rect().center
-#         text_rect.y = bg.get_height() - font_size * 1.5
-#         font.render_to(bg, text_rect, text, size=font_size)
-
-#         self.window.blit(bg, (0, 0))
-#         pygame.event.pump()
-#         self.clock.tick(self.metadata["render_fps"])
-#         pygame.display.flip()
