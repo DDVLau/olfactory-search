@@ -4,6 +4,33 @@ import numpy as np
 import scipy
 
 @dataclasses.dataclass
+class ParametersGaussianPlume:
+    grid_size: int      # length of each dimension
+    T_max: int          # maximum episode length
+    A0: float           # release rate, eq(11) on page 6
+    u: float            # wind speed
+    phi: float          # wind direction
+    d: float            # diffusion coefficient
+    tau: float          # particle lifetime
+    p_d: float          # detection probability
+    sigma_k: float      # background noise level
+
+    def __post_init__(self):
+        assert self.grid_size > 0
+        assert self.T_max > 0
+        assert self.A0 > 0
+        assert self.u >= 0
+        assert self.phi >= 0 and self.phi < 2 * np.pi
+        assert self.d > 0
+        assert self.tau > 0
+        assert self.p_d > 0 and self.p_d <= 1
+        assert self.sigma_k > 0
+
+        self.lambda_sensor = np.sqrt((self.d * self.tau)/(1 + (self.tau*self.u**2)/(4*self.d))) # eq(9) on page 5
+        self.scale_parameter = 3 / self.grid_size # According to Table 1 on page 9
+
+
+@dataclasses.dataclass
 class ParametersBase:
     grid_size: int  # length of each dimension
     h_max: int  # maximum number of hits where h in [0, 1, ..., h_max]
@@ -92,4 +119,16 @@ SMALLER_WINDY_DOMAIN_WITHOUT_DETECTION = ParametersWindy(
     R_bar=0.25,  # almost without detections
     V_bar=2.0,
     tau_bar=150.0,
+)
+
+SMALLER_GAUSSIAN = ParametersGaussianPlume(
+    grid_size=19,
+    T_max=642,
+    A0=0.75,
+    u=1.0,
+    phi=0.25*np.pi,
+    d=7.0,
+    tau=0.7,
+    p_d=0.7,
+    sigma_k=0.05
 )

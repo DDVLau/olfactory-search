@@ -16,6 +16,6 @@ register(
 )
 
 register(
-     id="olfactory_search/Windy3D-v0",
-     entry_point="olfactory_search.envs:Windy3D",
+     id="olfactory_search/GaussianPlume2D-v0",
+     entry_point="olfactory_search.envs:GaussianPlume2D",
 )

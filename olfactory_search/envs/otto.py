@@ -1,9 +1,3 @@
-"""
-    Reference: 
-     - Paper: https://link.springer.com/article/10.1140/epje/s10189-023-00277-8
-     - Code: https://github.com/auroreloisy/otto-benchmark
-"""
-
 from abc import abstractmethod
 from collections import namedtuple
 
@@ -39,35 +33,34 @@ ACTIONS_3D = [
 
 
 class OlfactoryEnv(gym.Env):
-    """ """
-
     metadata = {
         "render_modes": ["human", "rgb_array"],
         "render_fps": 10,
+        "model": ["discrete", "continuous"],
+        "tasks": ["estimate", "reach"],
     }
 
     def __init__(
         self,
         num_dimensions: int,
         parameters,
-        task: str | None = None,
+        model: str = "discrete",
+        task: str = "reach",
         render_mode: str | None = None,
         screen_size: int | None = 640,
+        tile_size: int | None = 32,
     ):
-        assert task is None or task in ["guess", "reach"]
-        
+        assert model in self.metadata["model"]
+        assert task in self.metadata["tasks"]
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+
         self.num_dimensions = num_dimensions
         self.parameters = parameters
+        self.model = model
         self.task = task
         self.render_mode = render_mode
         self.screen_size = screen_size
-        self.tile_size = 32
-        # self.rf = RenderFrame(self.parameters.grid_size)
-
-        assert (
-            self.render_mode is None
-            or self.render_mode in self.metadata["render_modes"]
-        )
+        self.tile_size = tile_size
 
         self.observation_space = spaces.Dict(
             {
@@ -77,26 +70,49 @@ class OlfactoryEnv(gym.Env):
                     shape=(num_dimensions,),
                     dtype=np.int64,
                 ),
-                "hits": spaces.Discrete(self.parameters.h_max + 1),
+                "hits": (
+                    spaces.Discrete(self.parameters.h_max + 1)
+                    if self.model == "discrete"
+                    else spaces.Box(low=0, high=1, shape=(1,), dtype=np.float64)
+                ),
             }
         )
-        self._action_to_direction = ACTIONS_2D if num_dimensions == 2 else ACTIONS_3D
-        self.action_space = spaces.Discrete(len(self._action_to_direction))
+        self.action_space = None  # to be defined
 
-        self._state = None
+        if self.task == "reach":
+            self._action_to_direction = (
+                ACTIONS_2D if num_dimensions == 2 else ACTIONS_3D
+            )
+            self.action_space = spaces.Discrete(len(self._action_to_direction))
+        elif self.task == "guess":
+            self.action_space = spaces.Dict(
+                {
+                    "action": spaces.Discrete(len(self._action_to_direction)),
+                    "estimate": spaces.Box(
+                        low=-1, high=1, shape=(num_dimensions,), dtype=np.float64
+                    ),
+                }
+            )
+        # Store agent and source locations
+        self._state = {}
 
+        # record states for rendering
+        self.history = []
+
+        # rendering stuff
         self.render_size = None
         self.window = None
-        self.screen_size = 600
         self.clock = None
-
         self._tile_cache = {}
         self._render_cells = {}
-        self.history = []
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self._render_cells = {(i, j): OdorCell(hit=-2) for i in range(self.parameters.grid_size) for j in range(self.parameters.grid_size) }
+        self._render_cells = {
+            (i, j): OdorCell(hit=-2)
+            for i in range(self.parameters.grid_size)
+            for j in range(self.parameters.grid_size)
+        }
         self.history = []
 
         agent_location = self.np_random.integers(
@@ -106,6 +122,7 @@ class OlfactoryEnv(gym.Env):
             0, self.parameters.grid_size, size=2, dtype=np.int64
         )
 
+        # Fixed initial locations
         if options is not None:
             if "agent_location" in options:
                 assert self.num_dimensions == len(options["agent_location"])
@@ -118,8 +135,6 @@ class OlfactoryEnv(gym.Env):
 
         observation = self._observation(self._state["agent"])
         info = self._info()
-
-        # record states for rendering
         self.history.append(SingleState(self._state["agent"], observation["hits"]))
 
         return observation, info
@@ -127,19 +142,33 @@ class OlfactoryEnv(gym.Env):
     def step(self, action):
         direction = self._action_to_direction[action]
 
-        # We use `np.clip` to make sure we don't leave the grid
         self._state["agent"] = np.clip(
             self._state["agent"] + direction, 0, self.parameters.grid_size - 1
         )
 
-        # An episode is done iff the agent has reached the source
-        terminated = np.array_equal(self._state["agent"], self._state["source"])
-        truncated = False  # use gymnasium.make([...[, max_episode_steps=Parameters.T_max) to handle episode truncation
+        if self.task == "reach":
+            # An episode is done iff the agent has reached the source
+            terminated = np.array_equal(self._state["agent"], self._state["source"])
+        elif self.task == "estimate":
+            # An episode is done iff the agent has correct estimate of source location
+            assert "estimate" in action
+            # convert (-1, 1) to (0, grid_size)
+            self.action["estimate"] = np.clip(
+                np.round((self.action["estimate"] + 1) * self.parameters.grid_size / 2),
+                0,
+                self.parameters.grid_size - 1,
+            )
+            # epsilon distance
+            terminated = (
+                np.linalg.norm(self.action["estimate"] - self._state["source"]) < 0.1
+            )
+
+        truncated = True if len(self.history) >= self.parameters.T_max else False
+
         observation = self._observation(self._state["agent"])
-        reward = 0 if observation["hits"] == -1 else -1  # Binary sparse rewards
+        reward = self._reward() if observation["hits"] == -1 else 0
         info = self._info()
 
-        # record states for rendering
         self.history.append(SingleState(self._state["agent"], observation["hits"]))
 
         return observation, reward, terminated, truncated, info
@@ -158,7 +187,9 @@ class OlfactoryEnv(gym.Env):
             return self._tile_cache[key]
 
         if obj is not None:
-            img = 255*np.ones(shape=(tile_size * subdivs, tile_size * subdivs, 3), dtype=np.uint8)
+            img = 255 * np.ones(
+                shape=(tile_size * subdivs, tile_size * subdivs, 3), dtype=np.uint8
+            )
             obj.render(img)
             # Downsample the image to perform supersampling/anti-aliasing
             img = downsample(img, subdivs)
@@ -170,42 +201,51 @@ class OlfactoryEnv(gym.Env):
         self,
         tile_size: int,
     ) -> np.ndarray:
-        # Compute the total grid size
-        width_px = self.parameters.grid_size * tile_size
-        height_px = self.parameters.grid_size * tile_size
+        img = 255 * np.ones(
+            shape=(
+                self.parameters.grid_size * tile_size,
+                self.parameters.grid_size * tile_size,
+                3,
+            ),
+            dtype=np.uint8,
+        )
 
-        img = 255*np.ones(shape=(height_px, width_px, 3), dtype=np.uint8)
-
-        history = [tuple(item[0]) for item in self.history]
+        states = [tuple(item[0]) for item in self.history]
         hits = [item[1] for item in self.history]
 
         self._render_cells[tuple(self._state["source"])] = OdorCell(0, "source")
 
-
-        for idx, item in enumerate(history):
+        for idx, item in enumerate(states):
             i, j = item[0], item[1]
             cell = self._render_cells[(i, j)]
-            last_state = None if idx == 0 else history[idx - 1]
-            next_state = None if idx == len(history) - 1 else history[idx + 1]
-            last_action = None if last_state is None else np.array(history[idx]) - np.array(last_state)
-            next_action = None if next_state is None else -(np.array(next_state) - np.array(history[idx]))
+            last_state = None if idx == 0 else states[idx - 1]
+            next_state = None if idx == len(states) - 1 else states[idx + 1]
+            last_action = (
+                None
+                if last_state is None
+                else np.array(states[idx]) - np.array(last_state)
+            )
+            next_action = (
+                None
+                if next_state is None
+                else -(np.array(next_state) - np.array(states[idx]))
+            )
 
             if idx == 0:
                 cell.type = "start"
-            elif idx == len(history) - 1:
+            elif idx == len(states) - 1:
                 cell.type = "agent"
             else:
                 cell.type = "odor" if cell.type != "start" else cell.type
-            
+
             if last_action is not None:
                 cell.add_action(last_action[0], last_action[1])
 
             if next_action is not None:
                 cell.add_action(next_action[0], next_action[1])
-            
+
             cell.hit = hits[idx]
             self._render_cells[(i, j)] = cell
-
 
         # Render the grid
         for j in range(0, self.parameters.grid_size):
@@ -227,6 +267,8 @@ class OlfactoryEnv(gym.Env):
         img = self.render_frame(self.tile_size)
 
         if self.render_mode == "human":
+            assert self.num_dimensions == 2, "Only 2D rendering is supported"
+
             img = np.transpose(img, axes=(1, 0, 2))
             if self.render_size is None:
                 self.render_size = img.shape[:2]
@@ -236,7 +278,7 @@ class OlfactoryEnv(gym.Env):
                 self.window = pygame.display.set_mode(
                     (self.screen_size, self.screen_size)
                 )
-                pygame.display.set_caption("minigrid")
+                pygame.display.set_caption("olfactory")
             if self.clock is None:
                 self.clock = pygame.time.Clock()
             surf = pygame.surfarray.make_surface(img)
@@ -254,8 +296,14 @@ class OlfactoryEnv(gym.Env):
             bg = pygame.transform.smoothscale(bg, (self.screen_size, self.screen_size))
 
             font_size = 22
-            # text = self.mission
-            text = "Here is the text"
+            text = (
+                "Task: "
+                + self.task
+                + " Current agent pos: "
+                + str(self._state["agent"])
+                + " hits: "
+                + str(self.history[-1].hit)
+            )
             font = pygame.freetype.SysFont(pygame.font.get_default_font(), font_size)
             text_rect = font.get_rect(text, size=font_size)
             text_rect.center = bg.get_rect().center
@@ -274,6 +322,9 @@ class OlfactoryEnv(gym.Env):
         if self.window:
             pygame.quit()
 
+    def _reward(self):
+        return 1 - 0.9 * len(self.history) / self.parameters.T_max
+
     @abstractmethod
     def _observation(self, loc=None):
         raise NotImplementedError
@@ -284,10 +335,11 @@ class OlfactoryEnv(gym.Env):
 
 
 class Isotropic2D(OlfactoryEnv):
-    def __init__(
-        self, num_dimensions, parameters: ParametersIsotropic, render_mode=None
-    ):
-        super(Isotropic2D, self).__init__(num_dimensions, parameters, render_mode)
+    """
+    Reference:
+    - Paper: https://link.springer.com/article/10.1140/epje/s10189-023-00277-8
+    - Code: https://github.com/auroreloisy/otto-benchmark
+    """
 
     def _observation(self, loc):
         if np.array_equal(loc, self._state["source"]):
@@ -311,10 +363,11 @@ class Isotropic2D(OlfactoryEnv):
 
 
 class Isotropic3D(OlfactoryEnv):
-    def __init__(
-        self, num_dimensions, parameters: ParametersIsotropic, render_mode=None
-    ):
-        super(Isotropic3D, self).__init__(num_dimensions, parameters, render_mode)
+    """
+    Reference:
+    - Paper: https://link.springer.com/article/10.1140/epje/s10189-023-00277-8
+    - Code: https://github.com/auroreloisy/otto-benchmark
+    """
 
     def _observation(self, loc):
         if np.array_equal(loc, self._state["source"]):
@@ -338,9 +391,11 @@ class Isotropic3D(OlfactoryEnv):
 
 
 class Windy2D(OlfactoryEnv):
-    # TODO: hit recording abnormally high
-    def __init__(self, num_dimensions, parameters: ParametersWindy, render_mode=None):
-        super(Windy2D, self).__init__(num_dimensions, parameters, render_mode)
+    """
+    Reference:
+    - Paper: https://link.springer.com/article/10.1140/epje/s10189-023-00277-8
+    - Code: https://github.com/auroreloisy/otto-benchmark
+    """
 
     def _observation(self, loc):
         # The wind blows in the positive x-direction from Section B2
@@ -362,6 +417,58 @@ class Windy2D(OlfactoryEnv):
             probabilities = weights / np.sum(weights)
             hits = self.np_random.choice(self.parameters.h, p=probabilities)
         return {"agent": self._state["agent"], "hits": hits}
+
+    def _info(self):
+        return {"source": self._state["source"]}
+
+
+class GaussianPlume2D(OlfactoryEnv):
+    """
+    Reference:
+    - Paper: https://ieeexplore.ieee.org/document/8447286
+    - Code: https://github.com/Cunjia-Liu/AutoSTE
+    """
+
+    def _observation(self, loc):
+        if np.array_equal(loc, self._state["source"]):
+            sensor = 1
+        else:
+            normalised_x = self.parameters.scale_parameter * (
+                loc[0] - self._state["source"][0]
+            )
+            normalised_y = self.parameters.scale_parameter * (
+                loc[1] - self._state["source"][1]
+            )
+            l2_norm = np.linalg.norm(
+                self.parameters.scale_parameter * (self._state["source"] - loc)
+            )
+            T1 = np.exp(
+                -normalised_x
+                * self.parameters.u
+                * np.cos(self.parameters.phi)
+                / (2 * self.parameters.d)
+            )
+            T2 = np.exp(
+                -normalised_y
+                * self.parameters.u
+                * np.sin(self.parameters.phi)
+                / (2 * self.parameters.d)
+            )
+            concentration = (
+                self.parameters.A0
+                / (4 * np.pi * l2_norm)
+                * np.exp(-l2_norm / self.parameters.lambda_sensor)
+                * T1
+                * T2
+            )
+            sensor = (
+                np.clip(concentration + self.np_random.normal(0, 0.5), 0.0, 1.0)
+                if (self.np_random.random() < self.parameters.p_d)
+                else np.clip(self.np_random.normal(0, self.parameters.sigma_k), 0.0, 1.0)
+            )
+            sensor = 0 if sensor < 5e-4 else sensor
+
+        return {"agent": self._state["agent"], "hits": sensor}
 
     def _info(self):
         return {"source": self._state["source"]}

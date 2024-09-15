@@ -158,8 +158,12 @@ def point_in_triangle(a, b, c):
     return fn
 
 
+def adjust_alpha(color, a):
+    return color * a + (1.0 - a) * 255
+
+
 class OdorCell:
-    def __init__(self, hit=-2, type="odor"):
+    def __init__(self, hit:int|float=-2, type:str="odor"):
         self.hit = hit
         self.actions = {"12": False, "3": False, "6": False, "9": False}
         # self.last_action = None if last_action is None else compare_vectors(last_action)
@@ -209,7 +213,7 @@ class OdorCell:
         elif self.hit == 3:
             color = COLORS["hit3"]
         else:
-            raise ValueError("Invalid hit value")
+            color = adjust_alpha(COLORS["hit1"], np.clip(self.hit, 0, 1)) # Scale for better illustration
 
         fill_coords(img, point_in_circle(0.5, 0.5, 0.4), color=color)
 
